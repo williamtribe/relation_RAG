@@ -44,27 +44,16 @@ export default function Page() {
   return (
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 24 }}>
-        <h1 style={{ margin: 0 }}>Relation RAG</h1>
+        <h1 style={{ margin: 0 }}>낙성대 회동</h1>
         <KakaoLogin />
       </div>
-      <div style={{ margin: "16px 0", display: "flex", gap: 12, flexWrap: "wrap" }}>
-        <label style={{ fontSize: 14, flex: "1 1 280px" }}>
-          내 이름
-          <input
-            value={currentUserName}
-            onChange={(e) => setCurrentUserName(e.target.value)}
-            placeholder="예: 홍길동"
-            style={{ width: "100%", marginTop: 4, border: "1px solid #e5e7eb", borderRadius: 6, padding: 8 }}
-          />
-        </label>
-        <p style={{ fontSize: 13, color: "#6b7280", maxWidth: 340 }}>
-          {kakaoUser ? (
-            <>카카오 로그인으로 자동 인식되었습니다. 이름을 수정하거나 프로필을 관리할 수 있습니다.</>
-          ) : (
-            <>입력한 이름과 프로필 목록을 매칭해 내 정보를 자동으로 찾거나 새 프로필을 만들 수 있습니다.</>
-          )}
-        </p>
-      </div>
+      {!kakaoUser && (
+        <div style={{ marginBottom: 24, padding: 16, background: "#fef3c7", border: "1px solid #fbbf24", borderRadius: 8 }}>
+          <p style={{ margin: 0, fontSize: 14, color: "#92400e" }}>
+            프로필을 수정하려면 카카오 로그인이 필요합니다.
+          </p>
+        </div>
+      )}
       <ProfileGrid 
         currentUserName={currentUserName.trim()} 
         currentProfileId={currentProfileId}

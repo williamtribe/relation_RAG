@@ -11,6 +11,7 @@ type Profile = {
   tags?: string[];
   avatar_url?: string;
   updated_at?: string;
+  likes?: string[]; // 자신에게 좋아요를 누른 사람들의 ID 배열
 };
 type SearchMatch = {
   id: string;
@@ -99,6 +100,9 @@ export default function ProfileGrid({
       if (profile) {
         setResolvedUserId(currentProfileId);
         return;
+      } else if (profiles.length > 0) {
+        // 프로필 목록이 로드되었는데 currentProfileId를 찾지 못한 경우
+        console.warn("프로필을 찾을 수 없습니다:", currentProfileId);
       }
     }
     
@@ -133,6 +137,28 @@ export default function ProfileGrid({
     .map((id) => profiles.find((p) => p.id === id))
     .filter((p): p is Profile => Boolean(p))
     .slice(0, 6);
+
+  // 내가 좋아요를 누른 사람들의 프로필
+  const likedProfiles = Array.from(likedIds)
+    .map((id) => profiles.find((p) => p.id === id))
+    .filter((p): p is Profile => Boolean(p));
+
+  // 나에게 좋아요를 누른 사람들의 프로필 (본인만 확인 가능)
+  const likedByProfiles = useMemo(() => {
+    if (!selfProfile?.likes || !Array.isArray(selfProfile.likes)) {
+      return [];
+    }
+    const result = selfProfile.likes
+      .map((id) => profileMap.get(id))
+      .filter((p): p is Profile => Boolean(p));
+    
+    console.log("나에게 좋아요를 누른 사람들:", {
+      likesIds: selfProfile.likes,
+      foundProfiles: result.map(p => ({ id: p.id, name: p.name }))
+    });
+    
+    return result;
+  }, [selfProfile?.likes, profileMap]);
 
   const vectorMatchProfiles = vectorMatches.reduce<{ profile: Profile; distance?: number }[]>(
     (acc, { profile_id, distance }) => {
@@ -183,7 +209,11 @@ export default function ProfileGrid({
   }
 
   async function toggleLike(targetId: string, on: boolean) {
-    if (!resolvedUserId) return;
+    if (!resolvedUserId) {
+      console.warn("좋아요를 누르려면 먼저 로그인해주세요.");
+      alert("좋아요를 누르려면 먼저 카카오 로그인을 해주세요.");
+      return;
+    }
     setLikedIds(prev => {
       const next = new Set(prev);
       if (on) next.add(targetId); else next.delete(targetId);
@@ -194,8 +224,19 @@ export default function ProfileGrid({
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ liker_id: resolvedUserId, likee_id: targetId, on }),
     });
+    
+    const responseData = await res.json().catch(() => ({}));
+    
     if (!res.ok) {
+      console.error("좋아요 업데이트 실패:", responseData);
+      alert(`좋아요 업데이트 실패: ${responseData.error || "알 수 없는 오류"}`);
+      // 실패 시 UI 상태 복원
       await fetchLikes();
+    } else {
+      console.log("좋아요 업데이트 성공:", responseData);
+      // 성공 시에도 최신 상태로 갱신
+      await fetchLikes();
+      await fetchProfiles(); // 프로필 목록도 새로고침하여 likes 배열 업데이트
     }
   }
 
@@ -207,7 +248,12 @@ export default function ProfileGrid({
   }
 
   async function saveBasicProfile() {
-    const baseName = (selfDraft.name || currentUserName).trim();
+    if (!resolvedUserId) {
+      setBasicError("로그인이 필요합니다.");
+      alert("프로필을 수정하려면 카카오 로그인이 필요합니다.");
+      return;
+    }
+    const baseName = selfDraft.name.trim();
     if (!baseName) {
       setBasicError("이름을 입력해 주세요.");
       return;
@@ -241,19 +287,8 @@ export default function ProfileGrid({
 
         await patchProfile(resolvedUserId, patch);
       } else {
-        const res = await fetch("/api/profiles", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.error || "프로필 생성 실패");
-        const newId = data?.data?.id;
-        if (newId) {
-          setResolvedUserId(newId);
-        }
-        await fetchProfiles();
-        await fetchAIPicks();
+        // 로그인하지 않은 경우 프로필 생성 불가
+        throw new Error("프로필을 생성하려면 카카오 로그인이 필요합니다.");
       }
       setBasicSuccess("기본 정보가 저장되었습니다.");
     } catch (err: any) {
@@ -264,6 +299,11 @@ export default function ProfileGrid({
   }
 
   async function saveIntroProfile() {
+    if (!resolvedUserId) {
+      setIntroError("로그인이 필요합니다.");
+      alert("프로필을 수정하려면 카카오 로그인이 필요합니다.");
+      return;
+    }
     const introText = selfDraft.intro.trim();
     if (!introText) {
       setIntroError("소개를 입력해 주세요.");
@@ -281,32 +321,10 @@ export default function ProfileGrid({
           return;
         }
         await patchProfile(resolvedUserId, { intro: introText });
+        setIntroSuccess("소개/임베딩이 업데이트되었습니다.");
       } else {
-        const baseName = (selfDraft.name || currentUserName).trim();
-        if (!baseName) throw new Error("먼저 이름을 입력해 주세요.");
-        const payload = {
-          name: baseName,
-          company: selfDraft.company.trim(),
-          role: selfDraft.role.trim(),
-          intro: introText,
-          tags: parseTags(selfDraft.tagsText),
-        };
-        const res = await fetch("/api/profiles", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(payload),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data?.error || "프로필 생성 실패");
-        const newId = data?.data?.id;
-        if (newId) {
-          setResolvedUserId(newId);
-          await upsertEmbedding(newId, introText);
-        }
-        await fetchProfiles();
-        await fetchAIPicks();
+        throw new Error("프로필을 찾을 수 없습니다. 로그인 상태를 확인해주세요.");
       }
-      setIntroSuccess("소개/임베딩이 업데이트되었습니다.");
     } catch (err: any) {
       setIntroError(err?.message || "저장 실패");
     } finally {
@@ -318,12 +336,12 @@ export default function ProfileGrid({
     <div style={{ display: "grid", gap: 24 }}>
       <section>
         <h2 style={{ fontSize: 18, fontWeight: 600 }}>내 정보</h2>
-        {!currentUserName && (
+        {!resolvedUserId && (
           <p style={{ marginTop: 8, color: "#6b7280" }}>
-            상단에서 이름을 입력하면 내 정보를 등록하거나 수정할 수 있습니다.
+            카카오 로그인을 하면 내 정보를 등록하거나 수정할 수 있습니다.
           </p>
         )}
-        {currentUserName && (
+        {resolvedUserId && (
           <div style={{ marginTop: 12, display: "grid", gap: 12, maxWidth: 720 }}>
             <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
               <label style={{ flex: "1 1 200px", fontSize: 14 }}>
@@ -405,6 +423,67 @@ export default function ProfileGrid({
               {introError && <span style={{ color: "#dc2626" }}>{introError}</span>}
               {introSuccess && <span style={{ color: "#16a34a" }}>{introSuccess}</span>}
             </div>
+            
+            {/* 나에게 좋아요를 누른 사람들 (본인만 확인 가능) */}
+            {selfProfile && (
+              <div style={{ marginTop: 16, padding: 16, background: "#f9fafb", borderRadius: 8 }}>
+                <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 12 }}>
+                  나에게 좋아요를 누른 사람들
+                  {likedByProfiles.length > 0 && ` (${likedByProfiles.length})`}
+                </h3>
+                {likedByProfiles.length > 0 ? (
+                  <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
+                    {likedByProfiles.map(p => (
+                      <button
+                        key={p.id}
+                        onClick={() => setSelected(p)}
+                        style={{ 
+                          border: "1px solid #e5e7eb", 
+                          borderRadius: 6, 
+                          padding: 12, 
+                          textAlign: "left", 
+                          background: "white",
+                          cursor: "pointer",
+                          transition: "all 0.2s"
+                        }}
+                        onMouseEnter={(e) => {
+                          e.currentTarget.style.borderColor = "#2563eb";
+                          e.currentTarget.style.boxShadow = "0 1px 3px rgba(0,0,0,0.1)";
+                        }}
+                        onMouseLeave={(e) => {
+                          e.currentTarget.style.borderColor = "#e5e7eb";
+                          e.currentTarget.style.boxShadow = "none";
+                        }}
+                      >
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          {p.avatar_url ? (
+                            <img 
+                              src={p.avatar_url} 
+                              alt={p.name}
+                              style={{ width: 32, height: 32, borderRadius: "50%", objectFit: "cover" }}
+                            />
+                          ) : (
+                            <div style={{ width: 32, height: 32, borderRadius: "50%", background: "#e5e7eb", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 600, color: "#6b7280" }}>
+                              {p.name?.[0]?.toUpperCase() || "?"}
+                            </div>
+                          )}
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontWeight: 600, fontSize: 14, color: "#111827" }}>{p.name || "이름 없음"}</div>
+                            <div style={{ fontSize: 12, opacity: 0.7, marginTop: 2, color: "#6b7280" }}>
+                              {[p.company, p.role].filter(Boolean).join(" • ") || "정보 없음"}
+                            </div>
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <p style={{ fontSize: 13, color: "#6b7280", margin: 0 }}>
+                    아직 좋아요를 누른 사람이 없습니다.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
         )}
       </section>
@@ -497,6 +576,24 @@ export default function ProfileGrid({
           ))}
         </div>
       </section>
+
+      {resolvedUserId && likedProfiles.length > 0 && (
+        <section>
+          <h2 style={{ fontSize: 18, fontWeight: 600 }}>내가 좋아요를 누른 사람들</h2>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginTop: 8 }}>
+            {likedProfiles.map(p => (
+              <button 
+                key={p.id} 
+                style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12, textAlign: "left" }} 
+                onClick={() => setSelected(p)}
+              >
+                <div style={{ fontWeight: 600 }}>{p.name}</div>
+                <div style={{ fontSize: 12, opacity: .7 }}>{p.company} • {p.role}</div>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section>
         <h2 style={{ fontSize: 18, fontWeight: 600 }}>모임 멤버</h2>
