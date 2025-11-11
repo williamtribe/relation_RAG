@@ -21,7 +21,13 @@ type SearchMatch = {
 };
 type VectorMatch = { profile_id: string; distance?: number };
 
-export default function ProfileGrid({ currentUserName }: { currentUserName: string }) {
+export default function ProfileGrid({ 
+  currentUserName, 
+  currentProfileId 
+}: { 
+  currentUserName: string;
+  currentProfileId?: string | null;
+}) {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [selected, setSelected] = useState<Profile | null>(null);
   const [aiPickIds, setAiPickIds] = useState<string[]>([]);
@@ -87,6 +93,16 @@ export default function ProfileGrid({ currentUserName }: { currentUserName: stri
   const selfProfile = resolvedUserId ? profileMap.get(resolvedUserId) || null : null;
 
   useEffect(() => {
+    // currentProfileId가 있으면 우선 사용 (카카오 로그인한 경우)
+    if (currentProfileId) {
+      const profile = profiles.find((p) => p.id === currentProfileId);
+      if (profile) {
+        setResolvedUserId(currentProfileId);
+        return;
+      }
+    }
+    
+    // currentProfileId가 없거나 찾지 못한 경우 이름으로 찾기
     if (!currentUserName.trim()) {
       setResolvedUserId("");
       return;
@@ -94,7 +110,7 @@ export default function ProfileGrid({ currentUserName }: { currentUserName: stri
     const normalized = currentUserName.trim().toLowerCase();
     const matched = profiles.find((p) => (p.name || "").trim().toLowerCase() === normalized);
     setResolvedUserId(matched?.id || "");
-  }, [currentUserName, profiles]);
+  }, [currentUserName, currentProfileId, profiles]);
 
   useEffect(() => {
     if (selfProfile) {
