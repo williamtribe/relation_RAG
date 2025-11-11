@@ -8,6 +8,8 @@ type Profile = {
   company?: string;
   role?: string;
   intro?: string;
+  hobby?: string; // 취미 소개
+  work?: string; // 일/직업 소개
   tags?: string[];
   avatar_url?: string;
   updated_at?: string;
@@ -31,7 +33,11 @@ export default function ProfileGrid({
 }) {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [selected, setSelected] = useState<Profile | null>(null);
-  const [aiPickIds, setAiPickIds] = useState<string[]>([]);
+  const [aiPicks, setAiPicks] = useState<{
+    intro: Array<{ profile_id: string; distance?: number }>;
+    work: Array<{ profile_id: string; distance?: number }>;
+    hobby: Array<{ profile_id: string; distance?: number }>;
+  }>({ intro: [], work: [], hobby: [] });
   const [likedIds, setLikedIds] = useState<Set<string>>(() => new Set());
   const [resolvedUserId, setResolvedUserId] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -45,6 +51,8 @@ export default function ProfileGrid({
     company: "",
     role: "",
     intro: "",
+    hobby: "",
+    work: "",
     tagsText: "",
   });
   const [basicSaving, setBasicSaving] = useState(false);
@@ -73,14 +81,19 @@ export default function ProfileGrid({
     const r = await fetch("/api/ai-picks", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile_id: resolvedUserId, limit: 6 })
+      body: JSON.stringify({ profile_id: resolvedUserId, limit: 4 })
     });
-    if (!r.ok) return;
+    if (!r.ok) {
+      console.error("AI 픽 가져오기 실패:", r.status, await r.text());
+      return;
+    }
     const j = await r.json();
-    const ids = Array.isArray(j.ids)
-      ? j.ids
-      : ((j.data || []).map((x: any) => x.profile_id));
-    setAiPickIds(ids);
+    console.log("AI 픽 응답:", j);
+    setAiPicks({
+      intro: j.intro || [],
+      work: j.work || [],
+      hobby: j.hobby || []
+    });
   }
   useEffect(() => { fetchProfiles(); }, []);
   useEffect(() => { fetchAIPicks(); }, [resolvedUserId]);
@@ -123,6 +136,8 @@ export default function ProfileGrid({
         company: selfProfile.company || "",
         role: selfProfile.role || "",
         intro: selfProfile.intro || "",
+        hobby: selfProfile.hobby || "",
+        work: selfProfile.work || "",
         tagsText: (selfProfile.tags || []).join(", "),
       });
     } else if (currentUserName) {
@@ -133,10 +148,18 @@ export default function ProfileGrid({
     }
   }, [selfProfile?.id, selfProfile?.updated_at, currentUserName]);
 
-  const aiPickProfiles = aiPickIds
-    .map((id) => profiles.find((p) => p.id === id))
-    .filter((p): p is Profile => Boolean(p))
-    .slice(0, 6);
+  // AI 픽 프로필들 (카테고리별로 분리)
+  const introPickProfiles = aiPicks.intro
+    .map(({ profile_id }) => profiles.find((p) => p.id === profile_id))
+    .filter((p): p is Profile => Boolean(p));
+  
+  const workPickProfiles = aiPicks.work
+    .map(({ profile_id }) => profiles.find((p) => p.id === profile_id))
+    .filter((p): p is Profile => Boolean(p));
+  
+  const hobbyPickProfiles = aiPicks.hobby
+    .map(({ profile_id }) => profiles.find((p) => p.id === profile_id))
+    .filter((p): p is Profile => Boolean(p));
 
   // 내가 좋아요를 누른 사람들의 프로필
   const likedProfiles = Array.from(likedIds)
@@ -304,23 +327,44 @@ export default function ProfileGrid({
       alert("프로필을 수정하려면 카카오 로그인이 필요합니다.");
       return;
     }
+    const workText = selfDraft.work.trim();
+    const hobbyText = selfDraft.hobby.trim();
     const introText = selfDraft.intro.trim();
+    
+    // 메인 자기소개는 필수
     if (!introText) {
-      setIntroError("소개를 입력해 주세요.");
+      setIntroError("메인 자기소개를 입력해 주세요.");
       return;
     }
+    
     setIntroSaving(true);
     setIntroError(null);
     setIntroSuccess(null);
 
     try {
       if (selfProfile && resolvedUserId) {
-        if ((selfProfile.intro || "").trim() === introText) {
+        // 변경사항 확인
+        const hasChanges = 
+          (selfProfile.work || "") !== workText ||
+          (selfProfile.hobby || "") !== hobbyText ||
+          (selfProfile.intro || "") !== introText;
+        
+        if (!hasChanges) {
           setIntroSuccess("소개가 이미 최신입니다.");
           setIntroSaving(false);
           return;
         }
-        await patchProfile(resolvedUserId, { intro: introText });
+        
+        // work, hobby, intro 모두 저장
+        await patchProfile(resolvedUserId, { 
+          work: workText,
+          hobby: hobbyText,
+          intro: introText
+        });
+        
+        // 임베딩 생성: 전체(합친 것), 일, 취미 각각 별도로
+        await upsertEmbedding(resolvedUserId, introText, workText, hobbyText);
+        
         setIntroSuccess("소개/임베딩이 업데이트되었습니다.");
       } else {
         throw new Error("프로필을 찾을 수 없습니다. 로그인 상태를 확인해주세요.");
@@ -396,15 +440,47 @@ export default function ProfileGrid({
               {basicSuccess && <span style={{ color: "#16a34a" }}>{basicSuccess}</span>}
             </div>
             <hr style={{ margin: "12px 0", border: "none", borderBottom: "1px solid #e5e7eb" }} />
-            <label style={{ fontSize: 14 }}>
-              소개
-              <textarea
-                value={selfDraft.intro}
-                onChange={(e) => setSelfDraft((d) => ({ ...d, intro: e.target.value }))}
-                rows={5}
-                style={{ width: "100%", marginTop: 4, border: "1px solid #e5e7eb", borderRadius: 6, padding: 8 }}
-              />
-            </label>
+            <div style={{ display: "grid", gap: 12 }}>
+              <label style={{ fontSize: 14 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                  <span style={{ fontWeight: 600 }}>메인 자기소개</span>
+                  <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 400 }}>(전체적인 자기소개)</span>
+                </div>
+                <textarea
+                  value={selfDraft.intro}
+                  onChange={(e) => setSelfDraft((d) => ({ ...d, intro: e.target.value }))}
+                  placeholder="자신에 대해 자유롭게 소개해주세요."
+                  rows={5}
+                  style={{ width: "100%", marginTop: 4, border: "1px solid #e5e7eb", borderRadius: 6, padding: 8 }}
+                />
+              </label>
+              <label style={{ fontSize: 14 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                  <span style={{ fontWeight: 600 }}>일 / 직업</span>
+                  <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 400 }}>(업무, 직업, 일에 대한 이야기)</span>
+                </div>
+                <textarea
+                  value={selfDraft.work}
+                  onChange={(e) => setSelfDraft((d) => ({ ...d, work: e.target.value }))}
+                  placeholder="예: 현재 키이스트에서 산업공학을 전공하고 있어요. 데이터 분석과 프로세스 개선에 관심이 많습니다."
+                  rows={4}
+                  style={{ width: "100%", marginTop: 4, border: "1px solid #e5e7eb", borderRadius: 6, padding: 8 }}
+                />
+              </label>
+              <label style={{ fontSize: 14 }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                  <span style={{ fontWeight: 600 }}>취미 / 관심사</span>
+                  <span style={{ fontSize: 12, color: "#6b7280", fontWeight: 400 }}>(취미, 관심사, 즐거운 이야기)</span>
+                </div>
+                <textarea
+                  value={selfDraft.hobby}
+                  onChange={(e) => setSelfDraft((d) => ({ ...d, hobby: e.target.value }))}
+                  placeholder="예: 주말에는 등산을 즐기고, 요리하는 걸 좋아해요. 최근에는 와인에 관심이 생겼습니다."
+                  rows={4}
+                  style={{ width: "100%", marginTop: 4, border: "1px solid #e5e7eb", borderRadius: 6, padding: 8 }}
+                />
+              </label>
+            </div>
             <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
               <button
                 onClick={saveIntroProfile}
@@ -565,17 +641,135 @@ export default function ProfileGrid({
         )}
       </section>
 
-      <section>
-        <h2 style={{ fontSize: 18, fontWeight: 600 }}>AI 픽</h2>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginTop: 8 }}>
-          {aiPickProfiles.map(p => (
-              <button key={p.id} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12, textAlign: "left" }} onClick={() => setSelected(p)}>
-                <div style={{ fontWeight: 600 }}>{p.name}</div>
-                <div style={{ fontSize: 12, opacity: .7 }}>{p.company} • {p.role}</div>
-              </button>
-          ))}
-        </div>
-      </section>
+      {resolvedUserId && (introPickProfiles.length > 0 || workPickProfiles.length > 0 || hobbyPickProfiles.length > 0) && (
+        <section>
+          <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 16 }}>AI 추천</h2>
+          <div style={{ display: "grid", gap: 24 }}>
+            {introPickProfiles.length > 0 && (
+              <div>
+                <h3 style={{ fontSize: 14, fontWeight: 600, color: "#6b7280", marginBottom: 8 }}>
+                  자기소개가 비슷한 사람들
+                </h3>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
+                  {introPickProfiles.map(p => (
+                    <button 
+                      key={p.id} 
+                      style={{ 
+                        border: "1px solid #e5e7eb", 
+                        borderRadius: 8, 
+                        padding: 12, 
+                        textAlign: "left",
+                        background: "white",
+                        cursor: "pointer",
+                        transition: "all 0.2s"
+                      }} 
+                      onClick={() => setSelected(p)}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.borderColor = "#2563eb";
+                        e.currentTarget.style.boxShadow = "0 2px 4px rgba(0,0,0,0.1)";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.borderColor = "#e5e7eb";
+                        e.currentTarget.style.boxShadow = "none";
+                      }}
+                    >
+                      <div style={{ fontWeight: 600, fontSize: 14 }}>{p.name}</div>
+                      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>{p.company} • {p.role}</div>
+                      {p.intro && (
+                        <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6, lineHeight: 1.4 }}>
+                          {(p.intro || "").slice(0, 60)}{p.intro.length > 60 ? "..." : ""}
+                        </div>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            
+            {workPickProfiles.length > 0 && (
+              <div>
+                <h3 style={{ fontSize: 14, fontWeight: 600, color: "#6b7280", marginBottom: 8 }}>
+                  일/직업이 비슷한 사람들
+                </h3>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
+                  {workPickProfiles.map(p => (
+                    <button 
+                      key={p.id} 
+                      style={{ 
+                        border: "1px solid #e5e7eb", 
+                        borderRadius: 8, 
+                        padding: 12, 
+                        textAlign: "left",
+                        background: "white",
+                        cursor: "pointer",
+                        transition: "all 0.2s"
+                      }} 
+                      onClick={() => setSelected(p)}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.borderColor = "#2563eb";
+                        e.currentTarget.style.boxShadow = "0 2px 4px rgba(0,0,0,0.1)";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.borderColor = "#e5e7eb";
+                        e.currentTarget.style.boxShadow = "none";
+                      }}
+                    >
+                      <div style={{ fontWeight: 600, fontSize: 14 }}>{p.name}</div>
+                      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>{p.company} • {p.role}</div>
+                      {p.work && (
+                        <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6, lineHeight: 1.4 }}>
+                          {(p.work || "").slice(0, 60)}{p.work.length > 60 ? "..." : ""}
+                        </div>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+            
+            {hobbyPickProfiles.length > 0 && (
+              <div>
+                <h3 style={{ fontSize: 14, fontWeight: 600, color: "#6b7280", marginBottom: 8 }}>
+                  취미/관심사가 비슷한 사람들
+                </h3>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(200px, 1fr))", gap: 12 }}>
+                  {hobbyPickProfiles.map(p => (
+                    <button 
+                      key={p.id} 
+                      style={{ 
+                        border: "1px solid #e5e7eb", 
+                        borderRadius: 8, 
+                        padding: 12, 
+                        textAlign: "left",
+                        background: "white",
+                        cursor: "pointer",
+                        transition: "all 0.2s"
+                      }} 
+                      onClick={() => setSelected(p)}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.borderColor = "#2563eb";
+                        e.currentTarget.style.boxShadow = "0 2px 4px rgba(0,0,0,0.1)";
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.borderColor = "#e5e7eb";
+                        e.currentTarget.style.boxShadow = "none";
+                      }}
+                    >
+                      <div style={{ fontWeight: 600, fontSize: 14 }}>{p.name}</div>
+                      <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>{p.company} • {p.role}</div>
+                      {p.hobby && (
+                        <div style={{ fontSize: 12, color: "#6b7280", marginTop: 6, lineHeight: 1.4 }}>
+                          {(p.hobby || "").slice(0, 60)}{p.hobby.length > 60 ? "..." : ""}
+                        </div>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       {resolvedUserId && likedProfiles.length > 0 && (
         <section>
@@ -613,7 +807,24 @@ export default function ProfileGrid({
                 </div>
               </div>
               <div style={{ marginTop: 8, fontSize: 14 }}>
-                <InlineArea value={p.intro || ""} onChange={(v) => patchProfile(p.id, { intro: v })} />
+                {p.intro && (
+                  <div style={{ marginBottom: 8 }}>
+                    <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 4 }}>메인 자기소개</div>
+                    <div style={{ fontSize: 13 }}>{(p.intro || "").slice(0, 120)}{p.intro && p.intro.length > 120 ? "..." : ""}</div>
+                  </div>
+                )}
+                {p.work && (
+                  <div style={{ marginBottom: 8 }}>
+                    <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 4 }}>일 / 직업</div>
+                    <div style={{ fontSize: 13 }}>{(p.work || "").slice(0, 80)}{p.work && p.work.length > 80 ? "..." : ""}</div>
+                  </div>
+                )}
+                {p.hobby && (
+                  <div style={{ marginBottom: 8 }}>
+                    <div style={{ fontSize: 11, color: "#6b7280", marginBottom: 4 }}>취미 / 관심사</div>
+                    <div style={{ fontSize: 13 }}>{(p.hobby || "").slice(0, 80)}{p.hobby && p.hobby.length > 80 ? "..." : ""}</div>
+                  </div>
+                )}
               </div>
               <div style={{ marginTop: 8, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <TagRow tags={p.tags || []} onChange={(tags) => patchProfile(p.id, { tags })} />
@@ -669,11 +880,15 @@ function Like({ isOn, onToggle }: { isOn: boolean; onToggle: (on: boolean) => vo
     </button>
   );
 }
-  async function upsertEmbedding(profileId: string, intro?: string) {
-    if (!intro) return;
+  async function upsertEmbedding(profileId: string, intro?: string, work?: string, hobby?: string) {
     await fetch("/api/embeddings/upsert", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile_id: profileId, intro }),
+      body: JSON.stringify({ 
+        profile_id: profileId, 
+        intro: intro || "",
+        work: work || "",
+        hobby: hobby || ""
+      }),
     });
   }
