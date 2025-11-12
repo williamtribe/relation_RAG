@@ -2,6 +2,8 @@
 import { useEffect, useMemo, useState } from "react";
 import ProfileModal from "./ProfileModal";
 
+const CLUSTER_PREVIEW_LIMIT = 12;
+
 type Profile = {
   id: string;
   name: string;
@@ -21,15 +23,39 @@ type SearchMatch = {
   company?: string;
   role?: string;
   intro?: string;
+  work?: string;
+  hobby?: string;
+  matchedFields?: string[]; // 매칭된 필드 목록
 };
-type VectorMatch = { profile_id: string; distance?: number };
+type VectorMatch = { 
+  profile_id: string; 
+  distance?: number;
+  similarity?: number; // 유사도 직접 저장
+  matchTypes?: string[]; // 매칭된 타입 목록 (자기소개, 일/직업, 취미/관심사)
+  profile?: Profile | null;
+};
+type IntroCluster = {
+  clusterId: number;
+  label: string;
+  size: number;
+  keywords: string[];
+  members: Array<{
+    profile_id: string;
+    name: string | null;
+    company: string | null;
+    role: string | null;
+    introSnippet: string;
+  }>;
+};
 
-export default function ProfileGrid({ 
-  currentUserName, 
-  currentProfileId 
-}: { 
+export default function ProfileGrid({
+  currentUserName,
+  currentProfileId,
+  currentKakaoId,
+}: {
   currentUserName: string;
   currentProfileId?: string | null;
+  currentKakaoId?: string | null;
 }) {
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [selected, setSelected] = useState<Profile | null>(null);
@@ -46,6 +72,10 @@ export default function ProfileGrid({
   const [searchError, setSearchError] = useState<string | null>(null);
   const [searchMatches, setSearchMatches] = useState<SearchMatch[]>([]);
   const [vectorMatches, setVectorMatches] = useState<VectorMatch[]>([]);
+  const [introClusters, setIntroClusters] = useState<IntroCluster[]>([]);
+  const [clusterLoading, setClusterLoading] = useState(false);
+  const [clusterError, setClusterError] = useState<string | null>(null);
+  const [expandedClusters, setExpandedClusters] = useState<Set<number>>(() => new Set());
   const [selfDraft, setSelfDraft] = useState({
     name: "",
     company: "",
@@ -95,9 +125,19 @@ export default function ProfileGrid({
       hobby: j.hobby || []
     });
   }
+  const isAdmin = currentKakaoId === "4539688026";
+
   useEffect(() => { fetchProfiles(); }, []);
   useEffect(() => { fetchAIPicks(); }, [resolvedUserId]);
   useEffect(() => { fetchLikes(); }, [resolvedUserId]);
+  useEffect(() => {
+    if (isAdmin) {
+      fetchIntroClusters();
+    } else {
+      setIntroClusters([]);
+      setExpandedClusters(new Set());
+    }
+  }, [isAdmin]);
 
   const profileMap = useMemo(() => {
     const map = new Map<string, Profile>();
@@ -105,6 +145,63 @@ export default function ProfileGrid({
     return map;
   }, [profiles]);
   const selfProfile = resolvedUserId ? profileMap.get(resolvedUserId) || null : null;
+
+  const toggleClusterExpansion = (clusterId: number) => {
+    setExpandedClusters((prev) => {
+      const next = new Set(prev);
+      if (next.has(clusterId)) {
+        next.delete(clusterId);
+      } else {
+        next.add(clusterId);
+      }
+      return next;
+    });
+  };
+
+  const openProfile = (profileId: string, fallback?: Partial<Profile>) => {
+    const existing = profileMap.get(profileId);
+    if (existing) {
+      setSelected(existing);
+      return;
+    }
+    if (fallback) {
+      const safeName = fallback.name?.trim();
+      const fallbackProfile: Profile = {
+        id: profileId,
+        name: safeName && safeName.length ? safeName : "이름 없음",
+      };
+      if (typeof fallback.company === "string" && fallback.company.trim()) {
+        fallbackProfile.company = fallback.company;
+      }
+      if (typeof fallback.role === "string" && fallback.role.trim()) {
+        fallbackProfile.role = fallback.role;
+      }
+      if (typeof fallback.intro === "string" && fallback.intro.trim()) {
+        fallbackProfile.intro = fallback.intro;
+      }
+      if (typeof fallback.work === "string" && fallback.work.trim()) {
+        fallbackProfile.work = fallback.work;
+      }
+      if (typeof fallback.hobby === "string" && fallback.hobby.trim()) {
+        fallbackProfile.hobby = fallback.hobby;
+      }
+      if (Array.isArray(fallback.tags)) {
+        fallbackProfile.tags = fallback.tags;
+      }
+      if (Array.isArray(fallback.likes)) {
+        fallbackProfile.likes = fallback.likes;
+      }
+      if (typeof fallback.avatar_url === "string") {
+        fallbackProfile.avatar_url = fallback.avatar_url;
+      }
+      if (typeof fallback.updated_at === "string") {
+        fallbackProfile.updated_at = fallback.updated_at;
+      }
+      setSelected(fallbackProfile);
+      return;
+    }
+    console.warn("프로필 정보를 찾을 수 없습니다:", profileId);
+  };
 
   useEffect(() => {
     // currentProfileId가 있으면 우선 사용 (카카오 로그인한 경우)
@@ -183,14 +280,13 @@ export default function ProfileGrid({
     return result;
   }, [selfProfile?.likes, profileMap]);
 
-  const vectorMatchProfiles = vectorMatches.reduce<{ profile: Profile; distance?: number }[]>(
-    (acc, { profile_id, distance }) => {
-      const profile = profileMap.get(profile_id);
-      if (profile) acc.push({ profile, distance });
-      return acc;
-    },
-    []
-  );
+  const vectorMatchProfiles = vectorMatches.reduce<
+    { profile: Profile; distance?: number; similarity?: number; matchTypes?: string[] }[]
+  >((acc, { profile_id, profile, distance, similarity, matchTypes }) => {
+    const resolvedProfile = profile || profileMap.get(profile_id);
+    if (resolvedProfile) acc.push({ profile: resolvedProfile, distance, similarity, matchTypes });
+    return acc;
+  }, []);
 
   async function runSearch() {
     if (!searchQuery.trim()) {
@@ -260,6 +356,29 @@ export default function ProfileGrid({
       // 성공 시에도 최신 상태로 갱신
       await fetchLikes();
       await fetchProfiles(); // 프로필 목록도 새로고침하여 likes 배열 업데이트
+    }
+  }
+
+  async function fetchIntroClusters(options: { force?: boolean } = {}) {
+    if (!isAdmin) {
+      setClusterLoading(false);
+      setIntroClusters([]);
+      return;
+    }
+    setClusterLoading(true);
+    setClusterError(null);
+    try {
+      const params = new URLSearchParams();
+      if (options.force) params.set("force", "true");
+      const query = params.toString();
+      const res = await fetch(`/api/intro-clusters${query ? `?${query}` : ""}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data?.error || "클러스터링 정보를 불러오지 못했습니다.");
+      setIntroClusters(data?.clusters || []);
+    } catch (err: any) {
+      setClusterError(err?.message || "클러스터링 정보를 불러오지 못했습니다.");
+    } finally {
+      setClusterLoading(false);
     }
   }
 
@@ -376,8 +495,169 @@ export default function ProfileGrid({
     }
   }
 
-  return (
+return (
     <div style={{ display: "grid", gap: 24 }}>
+      {isAdmin && (
+        <section>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
+            <h2 style={{ fontSize: 18, fontWeight: 600 }}>자기소개 클러스터링</h2>
+            <button
+              onClick={() => fetchIntroClusters({ force: true })}
+              disabled={clusterLoading}
+              style={{
+                padding: "6px 14px",
+                borderRadius: 6,
+                border: "1px solid #d1d5db",
+                background: clusterLoading ? "#f3f4f6" : "white",
+                fontSize: 13,
+                cursor: clusterLoading ? "not-allowed" : "pointer",
+              }}
+            >
+              {clusterLoading ? "새로고침 중..." : "새로고침"}
+            </button>
+          </div>
+          {clusterError && (
+            <p style={{ marginTop: 8, color: "#dc2626", fontSize: 14 }}>{clusterError}</p>
+          )}
+          <div style={{ marginTop: 12 }}>
+            {clusterLoading && introClusters.length === 0 && (
+              <p style={{ fontSize: 14, color: "#6b7280" }}>클러스터를 계산하는 중입니다...</p>
+            )}
+            {!clusterLoading && introClusters.length === 0 && !clusterError && (
+              <p style={{ fontSize: 14, color: "#6b7280" }}>
+                아직 임베딩된 자기소개가 충분하지 않아 클러스터를 만들 수 없습니다.
+              </p>
+            )}
+            {introClusters.length > 0 && (
+              <div style={{ display: "grid", gap: 12, gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
+                {introClusters.map((cluster) => {
+                  const isExpanded = expandedClusters.has(cluster.clusterId);
+                  const previewMembers = cluster.members.slice(0, CLUSTER_PREVIEW_LIMIT);
+                  const membersToRender = isExpanded ? cluster.members : previewMembers;
+                  const remaining = cluster.members.length - membersToRender.length;
+                  return (
+                    <div
+                      key={cluster.clusterId}
+                      style={{
+                        border: "1px solid #e5e7eb",
+                        borderRadius: 12,
+                        padding: 16,
+                        background: "#ffffff",
+                        display: "flex",
+                        flexDirection: "column",
+                        gap: 12,
+                      }}
+                    >
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 15 }}>{cluster.label}</div>
+                        <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>{cluster.size}명</div>
+                      </div>
+                      {cluster.keywords.length > 0 && (
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                          {cluster.keywords.map((keyword) => (
+                            <span
+                              key={keyword}
+                              style={{
+                                fontSize: 11,
+                                padding: "2px 8px",
+                                borderRadius: 12,
+                                background: "#eef2ff",
+                                color: "#3730a3",
+                                fontWeight: 500,
+                              }}
+                            >
+                              {keyword}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                        {membersToRender.map((member) => {
+                          const info = [member.company, member.role].filter(Boolean).join(" • ");
+                          return (
+                            <button
+                              key={member.profile_id}
+                              type="button"
+                              onClick={() =>
+                                openProfile(member.profile_id, {
+                                  name: member.name ?? undefined,
+                                  company: member.company ?? undefined,
+                                  role: member.role ?? undefined,
+                                  intro: member.introSnippet,
+                                })
+                              }
+                              title={member.introSnippet}
+                              style={{
+                                padding: "6px 10px",
+                                borderRadius: 999,
+                                border: "1px solid #d1d5db",
+                                background: "#f9fafb",
+                                fontSize: 12,
+                                textAlign: "left",
+                                cursor: "pointer",
+                                lineHeight: 1.3,
+                                display: "flex",
+                                flexDirection: "column",
+                                gap: 2,
+                                minWidth: 0,
+                              }}
+                            >
+                              <span style={{ fontWeight: 600, color: "#111827" }}>
+                                {member.name || "이름 없음"}
+                              </span>
+                              {info && (
+                                <span style={{ fontSize: 10, color: "#6b7280" }}>{info}</span>
+                              )}
+                            </button>
+                          );
+                        })}
+                        {remaining > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => toggleClusterExpansion(cluster.clusterId)}
+                            style={{
+                              fontSize: 12,
+                              color: "#2563eb",
+                              background: "transparent",
+                              border: "none",
+                              padding: "4px 8px",
+                              borderRadius: 8,
+                              cursor: "pointer",
+                              textDecoration: "underline",
+                              alignSelf: "center",
+                            }}
+                          >
+                            +{remaining}명 더 보기
+                          </button>
+                        )}
+                        {isExpanded && cluster.members.length > CLUSTER_PREVIEW_LIMIT && (
+                          <button
+                            type="button"
+                            onClick={() => toggleClusterExpansion(cluster.clusterId)}
+                            style={{
+                              fontSize: 12,
+                              color: "#6b7280",
+                              background: "transparent",
+                              border: "none",
+                              padding: "4px 8px",
+                              borderRadius: 8,
+                              cursor: "pointer",
+                              alignSelf: "center",
+                            }}
+                          >
+                            접기
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        </section>
+      )}
+
       <section>
         <h2 style={{ fontSize: 18, fontWeight: 600 }}>내 정보</h2>
         {!resolvedUserId && (
@@ -512,7 +792,7 @@ export default function ProfileGrid({
                     {likedByProfiles.map(p => (
                       <button
                         key={p.id}
-                        onClick={() => setSelected(p)}
+                        onClick={() => openProfile(p.id, p)}
                         style={{ 
                           border: "1px solid #e5e7eb", 
                           borderRadius: 6, 
@@ -597,43 +877,133 @@ export default function ProfileGrid({
           <div style={{ marginTop: 12 }}>
             <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>텍스트 검색 결과</h3>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12 }}>
-              {searchMatches.map((match) => (
-                <button
-                  key={match.id}
-                  onClick={() => setSelected(profileMap.get(match.id) || null)}
-                  style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12, textAlign: "left" }}
-                >
-                  <div style={{ fontWeight: 600 }}>{match.name}</div>
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>
-                    {[match.company, match.role].filter(Boolean).join(" • ")}
-                  </div>
-                  <p style={{ marginTop: 8, fontSize: 12, color: "#4b5563" }}>
-                    {(match.intro || "").slice(0, 80)}
-                  </p>
-                </button>
-              ))}
+              {searchMatches.map((match) => {
+                return (
+                  <button
+                    key={match.id}
+                    onClick={() =>
+                      openProfile(match.id, {
+                        name: match.name,
+                        company: match.company,
+                        role: match.role,
+                        intro: match.intro,
+                        work: match.work,
+                        hobby: match.hobby,
+                      })
+                    }
+                    style={{ 
+                      border: "1px solid #e5e7eb", 
+                      borderRadius: 8, 
+                      padding: 12, 
+                      textAlign: "left",
+                      background: "white",
+                      cursor: "pointer",
+                      transition: "all 0.2s"
+                    }}
+                    onMouseEnter={(e) => {
+                      e.currentTarget.style.borderColor = "#2563eb";
+                      e.currentTarget.style.boxShadow = "0 2px 4px rgba(0,0,0,0.1)";
+                    }}
+                    onMouseLeave={(e) => {
+                      e.currentTarget.style.borderColor = "#e5e7eb";
+                      e.currentTarget.style.boxShadow = "none";
+                    }}
+                  >
+                    <div style={{ fontWeight: 600 }}>{match.name}</div>
+                    <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+                      {[match.company, match.role].filter(Boolean).join(" • ") || "정보 없음"}
+                    </div>
+                    {match.matchedFields && match.matchedFields.length > 0 && (
+                      <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 4 }}>
+                        {match.matchedFields.map((field) => (
+                          <span
+                            key={field}
+                            style={{
+                              fontSize: 11,
+                              padding: "2px 6px",
+                              borderRadius: 4,
+                              background: "#dbeafe",
+                              color: "#1e40af",
+                              fontWeight: 500,
+                            }}
+                          >
+                            {field}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    <p style={{ marginTop: 8, fontSize: 12, color: "#4b5563", lineHeight: 1.4 }}>
+                      {(match.intro || match.work || match.hobby || "").slice(0, 80)}
+                      {((match.intro || match.work || match.hobby || "").length > 80) && "..."}
+                    </p>
+                  </button>
+                );
+              })}
             </div>
           </div>
         )}
         {useVector && vectorMatchProfiles.length > 0 && (
           <div style={{ marginTop: 12 }}>
-            <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>벡터 추천 결과</h3>
+            <h3 style={{ fontSize: 14, fontWeight: 600, marginBottom: 8 }}>AI 벡터 검색 결과</h3>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 12 }}>
-              {vectorMatchProfiles.map(({ profile, distance }) => (
+              {vectorMatchProfiles.map(({ profile, distance, similarity, matchTypes }) => (
                 <button
                   key={profile.id}
-                  onClick={() => setSelected(profile)}
-                  style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12, textAlign: "left" }}
+                  onClick={() => openProfile(profile.id, profile)}
+                  style={{ 
+                    border: "1px solid #e5e7eb", 
+                    borderRadius: 8, 
+                    padding: 12, 
+                    textAlign: "left",
+                    background: "white",
+                    cursor: "pointer",
+                    transition: "all 0.2s"
+                  }}
+                  onMouseEnter={(e) => {
+                    e.currentTarget.style.borderColor = "#2563eb";
+                    e.currentTarget.style.boxShadow = "0 2px 4px rgba(0,0,0,0.1)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.borderColor = "#e5e7eb";
+                    e.currentTarget.style.boxShadow = "none";
+                  }}
                 >
                   <div style={{ fontWeight: 600 }}>{profile.name}</div>
-                  <div style={{ fontSize: 12, opacity: 0.7 }}>
-                    {[profile.company, profile.role].filter(Boolean).join(" • ")}
+                  <div style={{ fontSize: 12, opacity: 0.7, marginTop: 4 }}>
+                    {[profile.company, profile.role].filter(Boolean).join(" • ") || "정보 없음"}
                   </div>
-                  {typeof distance === "number" && (
-                    <div style={{ fontSize: 12, marginTop: 4, color: "#6b7280" }}>
-                      거리: {distance.toFixed(3)}
+                  {matchTypes && matchTypes.length > 0 && (
+                    <div style={{ marginTop: 6, display: "flex", flexWrap: "wrap", gap: 4 }}>
+                      {matchTypes.map((type) => (
+                        <span
+                          key={type}
+                          style={{
+                            fontSize: 11,
+                            padding: "2px 6px",
+                            borderRadius: 4,
+                            background: "#fef3c7",
+                            color: "#92400e",
+                            fontWeight: 500,
+                          }}
+                        >
+                          {type}
+                        </span>
+                      ))}
                     </div>
                   )}
+                  {typeof similarity === "number" ? (
+                    <div style={{ fontSize: 11, marginTop: 6, color: "#6b7280" }}>
+                      유사도: {Math.abs(similarity).toFixed(3)}
+                    </div>
+                  ) : typeof distance === "number" ? (
+                    <div style={{ fontSize: 11, marginTop: 6, color: "#6b7280" }}>
+                      유사도: {Math.abs(1 - distance).toFixed(3)}
+                    </div>
+                  ) : null}
+                  <p style={{ marginTop: 8, fontSize: 12, color: "#4b5563", lineHeight: 1.4 }}>
+                    {(profile.intro || profile.work || profile.hobby || "").slice(0, 80)}
+                    {((profile.intro || profile.work || profile.hobby || "").length > 80) && "..."}
+                  </p>
                 </button>
               ))}
             </div>
@@ -663,7 +1033,7 @@ export default function ProfileGrid({
                         cursor: "pointer",
                         transition: "all 0.2s"
                       }} 
-                      onClick={() => setSelected(p)}
+                      onClick={() => openProfile(p.id, p)}
                       onMouseEnter={(e) => {
                         e.currentTarget.style.borderColor = "#2563eb";
                         e.currentTarget.style.boxShadow = "0 2px 4px rgba(0,0,0,0.1)";
@@ -704,7 +1074,7 @@ export default function ProfileGrid({
                         cursor: "pointer",
                         transition: "all 0.2s"
                       }} 
-                      onClick={() => setSelected(p)}
+                      onClick={() => openProfile(p.id, p)}
                       onMouseEnter={(e) => {
                         e.currentTarget.style.borderColor = "#2563eb";
                         e.currentTarget.style.boxShadow = "0 2px 4px rgba(0,0,0,0.1)";
@@ -745,7 +1115,7 @@ export default function ProfileGrid({
                         cursor: "pointer",
                         transition: "all 0.2s"
                       }} 
-                      onClick={() => setSelected(p)}
+                      onClick={() => openProfile(p.id, p)}
                       onMouseEnter={(e) => {
                         e.currentTarget.style.borderColor = "#2563eb";
                         e.currentTarget.style.boxShadow = "0 2px 4px rgba(0,0,0,0.1)";
@@ -767,11 +1137,11 @@ export default function ProfileGrid({
                 </div>
               </div>
             )}
-          </div>
-        </section>
-      )}
+      </div>
+    </section>
+  )}
 
-      {resolvedUserId && likedProfiles.length > 0 && (
+  {resolvedUserId && likedProfiles.length > 0 && (
         <section>
           <h2 style={{ fontSize: 18, fontWeight: 600 }}>내가 좋아요를 누른 사람들</h2>
           <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginTop: 8 }}>
@@ -779,7 +1149,7 @@ export default function ProfileGrid({
               <button 
                 key={p.id} 
                 style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12, textAlign: "left" }} 
-                onClick={() => setSelected(p)}
+                onClick={() => openProfile(p.id, p)}
               >
                 <div style={{ fontWeight: 600 }}>{p.name}</div>
                 <div style={{ fontSize: 12, opacity: .7 }}>{p.company} • {p.role}</div>
@@ -793,7 +1163,7 @@ export default function ProfileGrid({
         <h2 style={{ fontSize: 18, fontWeight: 600 }}>모임 멤버</h2>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginTop: 8 }}>
           {profiles.map(p => (
-            <div key={p.id} onClick={() => setSelected(p)} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12 }}>
+            <div key={p.id} onClick={() => openProfile(p.id, p)} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12 }}>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 <div style={{ width: 40, height: 40, borderRadius: 999, background: "#eee" }} />
                 <div>
@@ -880,15 +1250,15 @@ function Like({ isOn, onToggle }: { isOn: boolean; onToggle: (on: boolean) => vo
     </button>
   );
 }
-  async function upsertEmbedding(profileId: string, intro?: string, work?: string, hobby?: string) {
-    await fetch("/api/embeddings/upsert", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ 
-        profile_id: profileId, 
-        intro: intro || "",
-        work: work || "",
-        hobby: hobby || ""
-      }),
-    });
-  }
+async function upsertEmbedding(profileId: string, intro?: string, work?: string, hobby?: string) {
+  await fetch("/api/embeddings/upsert", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ 
+      profile_id: profileId, 
+      intro: intro || "",
+      work: work || "",
+      hobby: hobby || ""
+    }),
+  });
+}

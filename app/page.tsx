@@ -54,9 +54,10 @@ export default function Page() {
           </p>
         </div>
       )}
-      <ProfileGrid 
-        currentUserName={currentUserName.trim()} 
+      <ProfileGrid
+        currentUserName={currentUserName.trim()}
         currentProfileId={currentProfileId}
+        currentKakaoId={kakaoUser?.id || null}
       />
     </div>
   );
