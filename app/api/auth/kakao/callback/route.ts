@@ -50,7 +50,7 @@ export async function GET(request: Request) {
     const accessToken = tokenData.access_token;
 
     // 2. 액세스 토큰으로 사용자 정보 가져오기 (property_keys로 필요한 정보 요청)
-    const userResponse = await fetch("https://kapi.kakao.com/v2/user/me?property_keys=[\"kakao_account.profile.nickname\",\"kakao_account.profile_image\",\"kakao_account.email\"]", {
+    const userResponse = await fetch("https://kapi.kakao.com/v2/user/me?secure_resource=true&property_keys=[\"kakao_account.profile\",\"kakao_account.email\"]", {
       headers: {
         Authorization: `Bearer ${accessToken}`,
       },
@@ -217,4 +217,3 @@ export async function GET(request: Request) {
     return NextResponse.redirect(new URL(`/?error=${encodeURIComponent(error.message || "로그인 실패")}`, request.url));
   }
 }
-

@@ -1,8 +1,25 @@
 import { NextResponse } from "next/server";
 import { openai } from "../../../../lib/openai";
 import { supabaseAdmin } from "../../../../lib/db";
+import { getPineconeIndex, type ProfileVectorMetadata } from "../../../../lib/pinecone";
 
-type ProfileRow = { id: string; intro?: string | null; updated_at?: string | null };
+type ProfileRow = {
+  id: string;
+  intro?: string | null;
+  work?: string | null;
+  hobby?: string | null;
+  updated_at?: string | null;
+};
+type VectorType = ProfileVectorMetadata["vector_type"];
+
+const EMBEDDING_MODEL = "text-embedding-3-large";
+
+const vectorId = (profileId: string, type: VectorType) => `${profileId}:${type}`;
+
+const trimOrNull = (value?: string | null) => {
+  const trimmed = (value || "").trim();
+  return trimmed.length ? trimmed : null;
+};
 
 function chunk<T>(arr: T[], size: number): T[][] {
   const out: T[][] = [];
@@ -20,7 +37,7 @@ export async function POST(req: Request) {
 
     const { data: profiles, error: profileError } = await supabaseAdmin
       .from("profiles")
-      .select("id,intro,updated_at")
+      .select("id,intro,work,hobby,updated_at")
       .order("updated_at", { ascending: false });
     if (profileError) {
       return NextResponse.json({ error: profileError.message }, { status: 500 });
@@ -33,9 +50,12 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: embeddingsError.message }, { status: 500 });
     }
 
+    const hasAnyText = (profile?: ProfileRow | null) =>
+      Boolean(trimOrNull(profile?.intro) || trimOrNull(profile?.work) || trimOrNull(profile?.hobby));
+
     const existing = new Set((embeddings || []).map((row) => row.profile_id));
     const targets = (profiles || []).filter(
-      (p) => !!p.intro?.trim() && (force || !existing.has(p.id))
+      (p) => hasAnyText(p) && (force || !existing.has(p.id))
     );
     const toProcess = targets.slice(0, limit);
     if (!toProcess.length) {
@@ -43,25 +63,105 @@ export async function POST(req: Request) {
     }
 
     const batches = chunk(toProcess, 10);
+    const pineconeIndex = getPineconeIndex();
     let processed = 0;
     for (const batch of batches) {
-      const embeddingsResponse = await openai.embeddings.create({
-        model: "text-embedding-3-small",
-        input: batch.map((p) => p.intro as string),
+      const tasks: Array<{
+        profile: ProfileRow;
+        type: VectorType;
+        text: string;
+      }> = [];
+      const deletions: string[] = [];
+
+      for (const profile of batch) {
+        const introOnly = trimOrNull(profile.intro);
+        const workText = trimOrNull(profile.work);
+        const hobbyText = trimOrNull(profile.hobby);
+        const introText = [introOnly, workText, hobbyText].filter(Boolean).join(" ");
+
+        if (introText) {
+          tasks.push({ profile, type: "intro", text: introText });
+        } else {
+          deletions.push(vectorId(profile.id, "intro"));
+        }
+
+        if (workText) {
+          tasks.push({ profile, type: "work", text: workText });
+        } else {
+          deletions.push(vectorId(profile.id, "work"));
+        }
+
+        if (hobbyText) {
+          tasks.push({ profile, type: "hobby", text: hobbyText });
+        } else {
+          deletions.push(vectorId(profile.id, "hobby"));
+        }
+      }
+
+      const embeddingMap = new Map<
+        string,
+        {
+          intro?: number[];
+          work?: number[];
+          hobby?: number[];
+        }
+      >();
+      const pineconeVectors: Array<{
+        id: string;
+        values: number[];
+        metadata: ProfileVectorMetadata;
+      }> = [];
+
+      if (tasks.length) {
+        const embeddingsResponse = await openai.embeddings.create({
+          model: EMBEDDING_MODEL,
+          input: tasks.map((task) => task.text),
+        });
+
+        tasks.forEach((task, idx) => {
+          const values = embeddingsResponse.data[idx].embedding;
+          const entry = embeddingMap.get(task.profile.id) || {};
+          if (task.type === "intro") entry.intro = values;
+          if (task.type === "work") entry.work = values;
+          if (task.type === "hobby") entry.hobby = values;
+          embeddingMap.set(task.profile.id, entry);
+
+          pineconeVectors.push({
+            id: vectorId(task.profile.id, task.type),
+            values,
+            metadata: {
+              profile_id: task.profile.id,
+              vector_type: task.type,
+            },
+          });
+        });
+      }
+
+      const now = new Date().toISOString();
+      const rows = batch.map((profile) => {
+        const entry = embeddingMap.get(profile.id) || {};
+        return {
+          profile_id: profile.id,
+          embedding: entry.intro ?? null,
+          work_embedding: entry.work ?? null,
+          hobby_embedding: entry.hobby ?? null,
+          updated_at: now,
+        };
       });
 
-      const rows = batch.map((profile, idx) => ({
-        profile_id: profile.id,
-        embedding: embeddingsResponse.data[idx].embedding,
-        updated_at: new Date().toISOString(),
-      }));
-
-      const { error } = await supabaseAdmin
-        .from("profile_embeddings")
-        .upsert(rows);
+      const { error } = await supabaseAdmin.from("profile_embeddings").upsert(rows);
       if (error) {
         return NextResponse.json({ error: error.message, processed }, { status: 500 });
       }
+
+      if (pineconeVectors.length) {
+        await pineconeIndex.upsert(pineconeVectors);
+      }
+      if (deletions.length) {
+        const uniqueDeletes = Array.from(new Set(deletions));
+        await pineconeIndex.deleteMany(uniqueDeletes);
+      }
+
       processed += batch.length;
     }
 

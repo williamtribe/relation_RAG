@@ -1,6 +1,21 @@
 import { NextResponse } from "next/server";
 import { supabaseAdmin } from "../../../lib/db";
 
+// 임베딩을 배열로 변환하는 헬퍼 함수
+function parseEmbedding(embedding: any): number[] | null {
+  if (!embedding) return null;
+  if (Array.isArray(embedding)) return embedding;
+  if (typeof embedding === 'string') {
+    try {
+      const parsed = JSON.parse(embedding);
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 // 코사인 유사도 계산 함수
 function cosineSimilarity(vecA: number[], vecB: number[]): number {
   if (vecA.length !== vecB.length) return 0;
@@ -30,12 +45,18 @@ export async function POST(req: Request) {
     return NextResponse.json({ intro: [], work: [], hobby: [] });
   }
 
+  // 임베딩 파싱
+  const workEmbedding = parseEmbedding(me.work_embedding);
+  const hobbyEmbedding = parseEmbedding(me.hobby_embedding);
+
   console.log("임베딩 상태:", {
     hasEmbedding: !!me.embedding,
-    hasWorkEmbedding: !!me.work_embedding,
-    hasHobbyEmbedding: !!me.hobby_embedding,
-    workEmbeddingLength: me.work_embedding?.length,
-    hobbyEmbeddingLength: me.hobby_embedding?.length
+    hasWorkEmbedding: !!workEmbedding,
+    hasHobbyEmbedding: !!hobbyEmbedding,
+    workEmbeddingLength: workEmbedding?.length,
+    hobbyEmbeddingLength: hobbyEmbedding?.length,
+    workEmbeddingType: typeof me.work_embedding,
+    hobbyEmbeddingType: typeof me.hobby_embedding
   });
 
   const result: any = { intro: [], work: [], hobby: [] };
@@ -53,7 +74,7 @@ export async function POST(req: Request) {
   }
 
   // 2. 일/직업 기반 추천 (work_embedding 컬럼을 직접 검색)
-  if (me.work_embedding && Array.isArray(me.work_embedding) && me.work_embedding.length > 0) {
+  if (workEmbedding && workEmbedding.length > 0) {
     try {
       // work_embedding 컬럼을 가진 프로필들 중에서 유사도 검색
       const { data: allWorkEmbeddings, error: fetchError } = await supabaseAdmin
@@ -74,8 +95,9 @@ export async function POST(req: Request) {
           // 코사인 유사도 계산
           const similarities = allWorkEmbeddings
             .map((row: any) => {
-              if (!row.work_embedding || !Array.isArray(row.work_embedding)) return null;
-              const similarity = cosineSimilarity(me.work_embedding, row.work_embedding);
+              const rowEmbedding = parseEmbedding(row.work_embedding);
+              if (!rowEmbedding) return null;
+              const similarity = cosineSimilarity(workEmbedding, rowEmbedding);
               return { profile_id: row.profile_id, distance: 1 - similarity };
             })
             .filter((item: any) => item !== null)
@@ -94,7 +116,7 @@ export async function POST(req: Request) {
   }
 
   // 3. 취미/관심사 기반 추천 (hobby_embedding 컬럼을 직접 검색)
-  if (me.hobby_embedding && Array.isArray(me.hobby_embedding) && me.hobby_embedding.length > 0) {
+  if (hobbyEmbedding && hobbyEmbedding.length > 0) {
     try {
       // hobby_embedding 컬럼을 가진 프로필들 중에서 유사도 검색
       const { data: allHobbyEmbeddings, error: fetchError } = await supabaseAdmin
@@ -115,8 +137,9 @@ export async function POST(req: Request) {
           // 코사인 유사도 계산
           const similarities = allHobbyEmbeddings
             .map((row: any) => {
-              if (!row.hobby_embedding || !Array.isArray(row.hobby_embedding)) return null;
-              const similarity = cosineSimilarity(me.hobby_embedding, row.hobby_embedding);
+              const rowEmbedding = parseEmbedding(row.hobby_embedding);
+              if (!rowEmbedding) return null;
+              const similarity = cosineSimilarity(hobbyEmbedding, rowEmbedding);
               return { profile_id: row.profile_id, distance: 1 - similarity };
             })
             .filter((item: any) => item !== null)

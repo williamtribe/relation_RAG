@@ -1162,10 +1162,39 @@ return (
       <section>
         <h2 style={{ fontSize: 18, fontWeight: 600 }}>모임 멤버</h2>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 12, marginTop: 8 }}>
-          {profiles.map(p => (
+          {profiles.map((p) => (
             <div key={p.id} onClick={() => openProfile(p.id, p)} style={{ border: "1px solid #e5e7eb", borderRadius: 8, padding: 12 }}>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <div style={{ width: 40, height: 40, borderRadius: 999, background: "#eee" }} />
+                {p.avatar_url ? (
+                  <img
+                    src={p.avatar_url}
+                    alt={p.name || "avatar"}
+                    style={{
+                      width: 40,
+                      height: 40,
+                      borderRadius: "50%",
+                      objectFit: "cover",
+                      background: "#f3f4f6",
+                    }}
+                  />
+                ) : (
+                  <div
+                    style={{
+                      width: 40,
+                      height: 40,
+                      borderRadius: "50%",
+                      background: "#e5e7eb",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      fontSize: 16,
+                      fontWeight: 600,
+                      color: "#6b7280",
+                    }}
+                  >
+                    {p.name?.[0]?.toUpperCase() || "?"}
+                  </div>
+                )}
                 <div>
                   <Inline value={p.name} onChange={(v) => patchProfile(p.id, { name: v })} bold />
                   <div style={{ fontSize: 12, opacity: .7 }}>
