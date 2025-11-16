@@ -11,24 +11,20 @@ const apiKey = process.env.PINECONE_API_KEY;
 const indexName = process.env.PINECONE_INDEX;
 export const pineconeNamespace = process.env.PINECONE_NAMESPACE || "";
 
-if (!apiKey) {
-  throw new Error("PINECONE_API_KEY 환경 변수가 설정되지 않았습니다.");
-}
-
-if (!indexName) {
-  throw new Error("PINECONE_INDEX 환경 변수가 설정되지 않았습니다.");
-}
-
 const globalForPinecone = globalThis as GlobalPinecone;
 
-export const pinecone =
-  globalForPinecone.__pinecone ||
-  new Pinecone({
-    apiKey,
-  });
-
-if (process.env.NODE_ENV !== "production") {
-  globalForPinecone.__pinecone = pinecone;
+function getPineconeClient(): Pinecone {
+  if (globalForPinecone.__pinecone) {
+    return globalForPinecone.__pinecone;
+  }
+  if (!apiKey) {
+    throw new Error("PINECONE_API_KEY 환경 변수가 설정되지 않았습니다.");
+  }
+  const client = new Pinecone({ apiKey });
+  if (process.env.NODE_ENV !== "production") {
+    globalForPinecone.__pinecone = client;
+  }
+  return client;
 }
 
 /**
@@ -36,6 +32,10 @@ if (process.env.NODE_ENV !== "production") {
  * 서버리스/팟 타입 모두 동일하게 사용할 수 있습니다.
  */
 export function getPineconeIndex(): Index<ProfileVectorMetadata> {
-  const baseIndex = pinecone.index<ProfileVectorMetadata>(indexName || "");
+  const client = getPineconeClient();
+  if (!indexName) {
+    throw new Error("PINECONE_INDEX 환경 변수가 설정되지 않았습니다.");
+  }
+  const baseIndex = client.index<ProfileVectorMetadata>(indexName);
   return pineconeNamespace ? baseIndex.namespace(pineconeNamespace) : baseIndex;
 }

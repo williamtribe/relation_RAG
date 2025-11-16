@@ -2,26 +2,46 @@ import { NextResponse } from "next/server";
 import { setSession, KakaoUser } from "@/lib/auth";
 import { supabaseAdmin } from "@/lib/db";
 import { upsertProfileRow } from "@/lib/sheets";
+import { decodeState, resolveRedirectTarget } from "@/lib/redirect";
 
 const KAKAO_CLIENT_ID = process.env.KAKAO_CLIENT_ID!;
 const KAKAO_CLIENT_SECRET = process.env.KAKAO_CLIENT_SECRET!;
-const KAKAO_REDIRECT_URI = process.env.KAKAO_REDIRECT_URI || `${process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000"}/api/auth/kakao/callback`;
+const KAKAO_REDIRECT_URI =
+  process.env.KAKAO_REDIRECT_URI ||
+  `${process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000"}/api/auth/kakao/callback`;
+
+const buildRedirectUrl = (target: string | null, requestUrl: string) => {
+  if (!target) return new URL("/", requestUrl).toString();
+  if (target.startsWith("http://") || target.startsWith("https://")) {
+    return target;
+  }
+  return new URL(target, requestUrl).toString();
+};
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const code = searchParams.get("code");
   const error = searchParams.get("error");
+  const state = decodeState<{ redirect_to?: string }>(searchParams.get("state"));
+  const resolvedRedirect = resolveRedirectTarget(state?.redirect_to);
+  const redirectBase = buildRedirectUrl(resolvedRedirect, request.url);
+
+  const redirectWithError = (message: string) => {
+    const url = new URL(redirectBase);
+    url.searchParams.set("error", message);
+    return NextResponse.redirect(url);
+  };
 
   if (error) {
-    return NextResponse.redirect(new URL(`/?error=${encodeURIComponent(error)}`, request.url));
+    return redirectWithError(error);
   }
 
   if (!code) {
-    return NextResponse.redirect(new URL("/?error=인증 코드가 없습니다.", request.url));
+    return redirectWithError("인증 코드가 없습니다.");
   }
 
   if (!KAKAO_CLIENT_ID || !KAKAO_CLIENT_SECRET) {
-    return NextResponse.redirect(new URL("/?error=카카오 설정이 완료되지 않았습니다.", request.url));
+    return redirectWithError("카카오 설정이 완료되지 않았습니다.");
   }
 
   try {
@@ -43,7 +63,7 @@ export async function GET(request: Request) {
     if (!tokenResponse.ok) {
       const errorData = await tokenResponse.json();
       console.error("카카오 토큰 요청 실패:", errorData);
-      return NextResponse.redirect(new URL("/?error=토큰 요청 실패", request.url));
+      return redirectWithError("토큰 요청 실패");
     }
 
     const tokenData = await tokenResponse.json();
@@ -59,7 +79,7 @@ export async function GET(request: Request) {
     if (!userResponse.ok) {
       const errorData = await userResponse.json();
       console.error("카카오 사용자 정보 요청 실패:", errorData);
-      return NextResponse.redirect(new URL("/?error=사용자 정보 요청 실패", request.url));
+      return redirectWithError("사용자 정보 요청 실패");
     }
 
     const userData = await userResponse.json();
@@ -211,9 +231,9 @@ export async function GET(request: Request) {
     await setSession(kakaoUser);
 
     // 5. 메인 페이지로 리다이렉트
-    return NextResponse.redirect(new URL("/", request.url));
+    return NextResponse.redirect(redirectBase);
   } catch (error: any) {
     console.error("카카오 로그인 처리 중 오류:", error);
-    return NextResponse.redirect(new URL(`/?error=${encodeURIComponent(error.message || "로그인 실패")}`, request.url));
+    return redirectWithError(error.message || "로그인 실패");
   }
 }
